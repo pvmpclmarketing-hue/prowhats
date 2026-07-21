@@ -1,0 +1,10 @@
+{
+  "name": "fluxo-whatsapp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Painel de automação de conversas e fluxos para WhatsApp",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  }
+}

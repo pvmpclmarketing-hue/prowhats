@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ProWhats — Automação WhatsApp</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand"><span class="brand-mark">P</span><span>Pro<span>Whats</span></span></div>
+        <div class="workspace"><span class="avatar">PW</span><div><strong>ProWhats Empresa</strong><small>Ambiente principal</small></div><span>⌄</span></div>
+        <nav>
+          <button class="nav-item active" data-page="dashboard"><span>⌂</span>Início</button>
+          <button class="nav-item" data-page="chats"><span>◌</span>Chats ao vivo <b>3</b></button>
+          <button class="nav-item" data-page="kanban"><span>▦</span>Kanban</button>
+          <button class="nav-item" data-page="flows"><span>⌘</span>Fluxos</button>
+          <button class="nav-item" data-page="contacts"><span>♙</span>Contatos</button>
+          <button class="nav-item" data-page="connections"><span>◉</span>Conexões</button>
+          <button class="nav-item" data-page="settings"><span>⚙</span>Configurações</button>
+        </nav>
+        <div class="sidebar-bottom"><button class="nav-item"><span>?</span>Ajuda e suporte</button><div class="profile"><span class="avatar">PV</span><div><strong>Paulo Vitor</strong><small>Administrador</small></div><span>⋮</span></div></div>
+      </aside>
+      <main id="main-content"></main>
+    </div>
+    <div id="toast" role="status"></div>
+    <script src="/app.js"></script>
+  </body>
+</html>
