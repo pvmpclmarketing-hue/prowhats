@@ -7,6 +7,10 @@ const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; cha
 
 http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
+  if (url.pathname === '/api/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ service: 'prowhats-api', status: 'ok', timestamp: new Date().toISOString() }));
+  }
   const file = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
   const safe = path.normalize(file).replace(/^(\.\.([\\/]|$))+/, '');
   const target = path.join(root, safe);
