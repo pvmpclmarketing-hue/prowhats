@@ -5,6 +5,9 @@ const path = require('path');
 const root = path.join(__dirname, 'public');
 const mime = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml' };
 
+const port = Number(process.env.PORT || 3000);
+const host = '0.0.0.0';
+
 http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (url.pathname === '/api/health') {
@@ -20,4 +23,4 @@ http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': mime[path.extname(target)] || 'application/octet-stream' });
     res.end(content);
   });
-}).listen(process.env.PORT || 3000, () => console.log('Fluxo WhatsApp em http://localhost:3000'));
+}).listen(port, host, () => console.log(`ProWhats API em http://${host}:${port}`));
