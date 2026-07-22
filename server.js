@@ -189,7 +189,7 @@ async function routeApi(req, res, url) {
     const memberships = await userOrganizations(token, user.id);
     const organizationId = req.headers['x-organization-id'] || memberships[0]?.organization_id;
     const flowId = (graphMatch || simulationMatch)[1];
-    const foundFlows = await supabase(`/rest/v1/flows?select=id,organization_id,name,status,version&organization_id=eq.${escapeFilter(organizationId)}&id=eq.${escapeFilter(flowId)}`, { headers: { Authorization: `Bearer ${token}` } });
+    const foundFlows = await supabase(`/rest/v1/flows?select=id,organization_id,name,status,version,viewport&organization_id=eq.${escapeFilter(organizationId)}&id=eq.${escapeFilter(flowId)}`, { headers: { Authorization: `Bearer ${token}` } });
     const flow = foundFlows[0];
     if (!flow) return json(res, 404, { error: 'Fluxo nao encontrado.' });
     if (graphMatch && req.method === 'GET') {
@@ -198,18 +198,28 @@ async function routeApi(req, res, url) {
       return json(res, 200, { flow, nodes, edges });
     }
     if (graphMatch && req.method === 'PUT') {
-      const { nodes, edges, name, status } = await readJson(req);
+      const { nodes, edges, name, status, viewport } = await readJson(req);
       if (!Array.isArray(nodes) || !Array.isArray(edges) || !nodes.length) return json(res, 400, { error: 'O fluxo precisa ter ao menos um no.' });
       if (nodes.length > 150 || edges.length > 400) return json(res, 400, { error: 'Limite do fluxo excedido.' });
       const keys = new Set();
       for (const node of nodes) { if (!node.id || !node.type || keys.has(node.id)) return json(res, 400, { error: 'No invalido ou repetido.' }); keys.add(node.id); }
       for (const edge of edges) { if (!keys.has(edge.source) || !keys.has(edge.target) || edge.source === edge.target) return json(res, 400, { error: 'Conexao invalida.' }); }
+      const existingNodes = await supabase(`/rest/v1/flow_nodes?select=id,node_key&flow_id=eq.${escapeFilter(flowId)}`, { headers: { Authorization: `Bearer ${token}` } });
+      const existingByKey = new Map(existingNodes.map(node => [node.node_key, node.id]));
       await supabase(`/rest/v1/flow_edges?flow_id=eq.${escapeFilter(flowId)}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
-      await supabase(`/rest/v1/flow_nodes?flow_id=eq.${escapeFilter(flowId)}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
-      const savedNodes = await supabase('/rest/v1/flow_nodes', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Prefer: 'return=representation' }, body: JSON.stringify(nodes.map(node => ({ flow_id: flowId, node_key: String(node.id), node_type: String(node.type), position_x: Number(node.x) || 0, position_y: Number(node.y) || 0, config: { ...(node.config || {}), text: node.text || '' } }))) });
+      for (const node of nodes) {
+        const payload = { node_type: String(node.type), position_x: Number(node.x) || 0, position_y: Number(node.y) || 0, config: { ...(node.config || {}), text: node.text || '' } };
+        if (existingByKey.has(String(node.id))) await supabase(`/rest/v1/flow_nodes?id=eq.${escapeFilter(existingByKey.get(String(node.id)))}`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+      }
+      const staleIds = existingNodes.filter(node => !keys.has(node.node_key)).map(node => node.id);
+      if (staleIds.length) await supabase(`/rest/v1/flow_nodes?id=in.(${staleIds.join(',')})`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+      const newNodes = nodes.filter(node => !existingByKey.has(String(node.id)));
+      if (newNodes.length) await supabase('/rest/v1/flow_nodes', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Prefer: 'return=representation' }, body: JSON.stringify(newNodes.map(node => ({ flow_id: flowId, node_key: String(node.id), node_type: String(node.type), position_x: Number(node.x) || 0, position_y: Number(node.y) || 0, config: { ...(node.config || {}), text: node.text || '' } }))) });
+      const savedNodes = await supabase(`/rest/v1/flow_nodes?select=id,node_key&flow_id=eq.${escapeFilter(flowId)}`, { headers: { Authorization: `Bearer ${token}` } });
       const databaseIdByKey = new Map(savedNodes.map(node => [node.node_key, node.id]));
       if (edges.length) await supabase('/rest/v1/flow_edges', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(edges.map(edge => ({ flow_id: flowId, source_node_id: databaseIdByKey.get(edge.source), target_node_id: databaseIdByKey.get(edge.target), source_handle: edge.handle || 'success', label: edge.label || null }))) });
-      const [updated] = await supabase(`/rest/v1/flows?id=eq.${escapeFilter(flowId)}`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Prefer: 'return=representation' }, body: JSON.stringify({ name: String(name || flow.name).slice(0, 160), status: ['draft', 'active', 'paused'].includes(status) ? status : flow.status, version: Number(flow.version || 1) + 1 }) });
+      const safeViewport = viewport && Number.isFinite(Number(viewport.x)) && Number.isFinite(Number(viewport.y)) && Number.isFinite(Number(viewport.zoom)) ? { x: Number(viewport.x), y: Number(viewport.y), zoom: Math.min(2, Math.max(.1, Number(viewport.zoom))) } : flow.viewport;
+      const [updated] = await supabase(`/rest/v1/flows?id=eq.${escapeFilter(flowId)}`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Prefer: 'return=representation' }, body: JSON.stringify({ name: String(name || flow.name).slice(0, 160), status: ['draft', 'active', 'paused'].includes(status) ? status : flow.status, viewport: safeViewport, version: Number(flow.version || 1) + 1 }) });
       return json(res, 200, { flow: updated, nodes: savedNodes.length, edges: edges.length });
     }
     if (simulationMatch && req.method === 'POST') {
