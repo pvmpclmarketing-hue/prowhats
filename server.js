@@ -21,7 +21,7 @@ function setCors(req, res) {
   if (origin && allowed.includes(origin)) res.setHeader('Access-Control-Allow-Origin', origin);
   res.setHeader('Vary', 'Origin');
   res.setHeader('Access-Control-Allow-Headers', 'Authorization, Content-Type, X-Organization-Id');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
 }
 
 function readJson(req) {
@@ -36,6 +36,76 @@ function readJson(req) {
     });
     req.on('error', reject);
   });
+}
+
+function escapeFilter(value) { return encodeURIComponent(String(value)); }
+function renderVariables(value, variables) {
+  return String(value || '').replace(/\{\{?\s*([\w.]+)\s*\}?\}/g, (_, key) => {
+    const found = key.split('.').reduce((current, part) => current && current[part], variables);
+    return found === undefined || found === null ? '' : String(found);
+  });
+}
+
+function nodeHandles(node) {
+  const type = String(node.node_type || '').toLowerCase();
+  if (type === 'menu' || type === 'carrossel') {
+    const options = Array.isArray(node.config?.options) ? node.config.options : [];
+    return [...options.map(option => `option:${option.id}`), 'unmatched', 'timeout'];
+  }
+  if (type.includes('aguarda')) return ['response', 'timeout'];
+  if (type === 'condicional') return ['success', 'failure'];
+  if (type.includes('integra') || type.includes('ia')) return ['success', 'error'];
+  return ['success'];
+}
+
+function evaluateCondition(config, variables) {
+  const field = String(config.field || config.variable || 'last_response');
+  const actual = field.split('.').reduce((current, part) => current && current[part], variables);
+  const expected = renderVariables(config.value || '', variables);
+  const operator = config.operator || 'contains';
+  if (operator === 'equals') return String(actual ?? '').toLowerCase() === expected.toLowerCase();
+  if (operator === 'exists') return actual !== undefined && actual !== null && actual !== '';
+  if (operator === 'not_empty') return String(actual ?? '').trim() !== '';
+  return String(actual ?? '').toLowerCase().includes(expected.toLowerCase());
+}
+
+function simulateGraph(nodes, edges, input, initialVariables = {}) {
+  const byId = new Map(nodes.map(node => [node.id, node]));
+  const start = nodes.find(node => String(node.node_type).toLowerCase() === 'início' || String(node.node_type).toLowerCase() === 'inicio') || nodes[0];
+  const variables = { ...initialVariables };
+  const trace = [], messages = [];
+  let current = start;
+  let steps = 0;
+  while (current && steps++ < 50) {
+    const type = String(current.node_type || '').toLowerCase();
+    let handle = 'success';
+    let status = 'completed';
+    const config = current.config || {};
+    if (type === 'mensagem' || type === 'template whatsapp') {
+      const contents = Array.isArray(config.contents) && config.contents.length ? config.contents : [{ type: 'text', content: config.content || config.text || '' }];
+      for (const item of contents) messages.push({ nodeKey: current.node_key, type: item.type || 'text', content: renderVariables(item.content || item.url || '', variables), typingDelaySeconds: Number(config.typingDelaySeconds) || 0 });
+    } else if (type === 'menu' || type === 'carrossel') {
+      if (!input) { status = 'waiting'; handle = 'timeout'; }
+      else {
+        const option = (config.options || []).find(item => String(item.title || '').trim().toLowerCase() === String(input).trim().toLowerCase());
+        variables[config.variable || 'last_response'] = input;
+        handle = option ? `option:${option.id}` : 'unmatched';
+      }
+    } else if (type.includes('aguarda')) {
+      if (!input) { status = 'waiting'; handle = 'timeout'; }
+      else { variables[config.variable || 'last_response'] = input; handle = 'response'; }
+    } else if (type === 'intervalo inteligente') {
+      status = 'waiting';
+    } else if (type === 'condicional') {
+      handle = evaluateCondition(config, variables) ? 'success' : 'failure';
+    }
+    trace.push({ nodeKey: current.node_key, nodeType: current.node_type, status, handle });
+    if (status === 'waiting') return { status: 'waiting', waitingAt: current.node_key, variables, messages, options: (type === 'menu' || type === 'carrossel') ? (config.options || []).map(option => ({ id: option.id, title: option.title })) : [], trace };
+    const edge = edges.find(item => item.source_node_id === current.id && item.source_handle === handle)
+      || edges.find(item => item.source_node_id === current.id && item.source_handle === 'success');
+    current = edge ? byId.get(edge.target_node_id) : null;
+  }
+  return { status: steps >= 50 ? 'failed' : 'completed', variables, messages, trace };
 }
 
 async function supabase(pathname, options = {}, key = publishableKey) {
@@ -111,7 +181,46 @@ async function routeApi(req, res, url) {
       return json(res, 201, { flow });
     }
   }
-  return json(res, 404, { error: 'Rota de API não encontrada.' });
+  const graphMatch = url.pathname.match(/^\/api\/flows\/([0-9a-f-]{36})\/graph$/i);
+  const simulationMatch = url.pathname.match(/^\/api\/flows\/([0-9a-f-]{36})\/simulate$/i);
+  if (graphMatch || simulationMatch) {
+    const user = await authenticatedUser(req);
+    const token = req.headers.authorization.slice(7);
+    const memberships = await userOrganizations(token, user.id);
+    const organizationId = req.headers['x-organization-id'] || memberships[0]?.organization_id;
+    const flowId = (graphMatch || simulationMatch)[1];
+    const foundFlows = await supabase(`/rest/v1/flows?select=id,organization_id,name,status,version&organization_id=eq.${escapeFilter(organizationId)}&id=eq.${escapeFilter(flowId)}`, { headers: { Authorization: `Bearer ${token}` } });
+    const flow = foundFlows[0];
+    if (!flow) return json(res, 404, { error: 'Fluxo nao encontrado.' });
+    if (graphMatch && req.method === 'GET') {
+      const nodes = await supabase(`/rest/v1/flow_nodes?select=*&flow_id=eq.${escapeFilter(flowId)}&order=created_at.asc`, { headers: { Authorization: `Bearer ${token}` } });
+      const edges = await supabase(`/rest/v1/flow_edges?select=*&flow_id=eq.${escapeFilter(flowId)}&order=created_at.asc`, { headers: { Authorization: `Bearer ${token}` } });
+      return json(res, 200, { flow, nodes, edges });
+    }
+    if (graphMatch && req.method === 'PUT') {
+      const { nodes, edges, name, status } = await readJson(req);
+      if (!Array.isArray(nodes) || !Array.isArray(edges) || !nodes.length) return json(res, 400, { error: 'O fluxo precisa ter ao menos um no.' });
+      if (nodes.length > 150 || edges.length > 400) return json(res, 400, { error: 'Limite do fluxo excedido.' });
+      const keys = new Set();
+      for (const node of nodes) { if (!node.id || !node.type || keys.has(node.id)) return json(res, 400, { error: 'No invalido ou repetido.' }); keys.add(node.id); }
+      for (const edge of edges) { if (!keys.has(edge.source) || !keys.has(edge.target) || edge.source === edge.target) return json(res, 400, { error: 'Conexao invalida.' }); }
+      await supabase(`/rest/v1/flow_edges?flow_id=eq.${escapeFilter(flowId)}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+      await supabase(`/rest/v1/flow_nodes?flow_id=eq.${escapeFilter(flowId)}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+      const savedNodes = await supabase('/rest/v1/flow_nodes', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Prefer: 'return=representation' }, body: JSON.stringify(nodes.map(node => ({ flow_id: flowId, node_key: String(node.id), node_type: String(node.type), position_x: Number(node.x) || 0, position_y: Number(node.y) || 0, config: { ...(node.config || {}), text: node.text || '' } }))) });
+      const databaseIdByKey = new Map(savedNodes.map(node => [node.node_key, node.id]));
+      if (edges.length) await supabase('/rest/v1/flow_edges', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(edges.map(edge => ({ flow_id: flowId, source_node_id: databaseIdByKey.get(edge.source), target_node_id: databaseIdByKey.get(edge.target), source_handle: edge.handle || 'success', label: edge.label || null }))) });
+      const [updated] = await supabase(`/rest/v1/flows?id=eq.${escapeFilter(flowId)}`, { method: 'PATCH', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', Prefer: 'return=representation' }, body: JSON.stringify({ name: String(name || flow.name).slice(0, 160), status: ['draft', 'active', 'paused'].includes(status) ? status : flow.status, version: Number(flow.version || 1) + 1 }) });
+      return json(res, 200, { flow: updated, nodes: savedNodes.length, edges: edges.length });
+    }
+    if (simulationMatch && req.method === 'POST') {
+      const payload = await readJson(req);
+      const nodes = await supabase(`/rest/v1/flow_nodes?select=*&flow_id=eq.${escapeFilter(flowId)}&order=created_at.asc`, { headers: { Authorization: `Bearer ${token}` } });
+      const edges = await supabase(`/rest/v1/flow_edges?select=*&flow_id=eq.${escapeFilter(flowId)}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!nodes.length) return json(res, 409, { error: 'Salve os blocos antes de simular.' });
+      return json(res, 200, simulateGraph(nodes, edges, payload.input || '', payload.variables || {}));
+    }
+  }
+  return json(res, 404, { error: 'Rota de API nao encontrada.' });
 }
 
 http.createServer(async (req, res) => {

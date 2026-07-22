@@ -1,86 +1,86 @@
-/* Interactive canvas for the ProWhats flow editor. */
+/* ProWhats visual editor: persisted graph plus safe server-side simulation. */
 (() => {
-  const graphKey = 'prowhats_editor_graphs';
-  const palette = ['Mensagem', 'Template WhatsApp', 'Menu', 'Carrossel', 'Aguarda resposta', 'Condicional', 'Etiquetas', 'Departamento', 'Kanban', 'Integração', 'Bloco de IA', 'Webhook', 'Finalizar'];
-  const icons = ['✉', '▤', '≡', '▧', '◷', '◇', '♟', '♙', '▦', '⌁', '✦', '↗', '■'];
-  const defaultGraph = () => ({
+  const palette = ['Mensagem', 'Template WhatsApp', 'Menu', 'Carrossel', 'Aguarda resposta', 'Intervalo Inteligente', 'Condicional', 'Etiquetas', 'Departamento', 'Kanban', 'Integração', 'Bloco de IA', 'Finalizar'];
+  const icon = ['✉', '▤', '☷', '▧', '◷', '◴', '◇', '🏷', '♙', '▦', '⌁', '✦', '■'];
+  const config = () => window.PROWHATS_CONFIG?.apiBaseUrl || 'http://localhost:3000';
+  const session = () => JSON.parse(localStorage.getItem('prowhats_session') || 'null');
+  const api = async (path, options = {}) => {
+    const token = session()?.access_token;
+    const response = await fetch(`${config()}${path}`, { ...options, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', ...(options.headers || {}) } });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || 'Não foi possível concluir a operação.');
+    return data;
+  };
+  const defaults = () => ({
     nodes: [
-      { id: 'start', type: 'Início', text: 'Mensagem recebida', x: 45, y: 305 },
-      { id: 'message', type: 'Mensagem', text: 'Olá, {first_name}! Como posso ajudar?', x: 285, y: 305 },
-      { id: 'wait', type: 'Aguarda resposta', text: 'Espera até 1 dia pela resposta', x: 535, y: 305 },
-      { id: 'condition', type: 'Condicional', text: 'Resposta contém “atendimento”', x: 785, y: 205 },
-      { id: 'human', type: 'Departamento', text: 'Enviar para Comercial', x: 1020, y: 205 },
-      { id: 'ai', type: 'Bloco de IA', text: 'Classificar intenção do contato', x: 785, y: 430 }
+      { id: 'start', type: 'Início', text: 'Quando receber uma mensagem', x: 50, y: 280, config: {} },
+      { id: 'message', type: 'Mensagem', text: 'Olá, {first_name}! Como posso ajudar?', x: 310, y: 280, config: { content: 'Olá, {first_name}! Como posso ajudar?' } },
+      { id: 'wait', type: 'Aguarda resposta', text: 'Aguardar resposta do contato', x: 570, y: 280, config: { variable: 'last_response', timeoutHours: 24, bufferSeconds: 0 } }
     ],
-    edges: [
-      { source: 'start', target: 'message' }, { source: 'message', target: 'wait' },
-      { source: 'wait', target: 'condition' }, { source: 'condition', target: 'human' }, { source: 'wait', target: 'ai' }
-    ]
+    edges: [{ source: 'start', target: 'message', handle: 'success' }, { source: 'message', target: 'wait', handle: 'success' }]
   });
-  const loadGraphs = () => JSON.parse(localStorage.getItem(graphKey) || '{}');
-  const persistGraph = (id, graph) => { const all = loadGraphs(); all[id] = graph; localStorage.setItem(graphKey, JSON.stringify(all)); };
+  const normalized = result => {
+    if (!result.nodes?.length) return defaults();
+    const idByDbId = new Map(result.nodes.map(node => [node.id, node.node_key]));
+    return { nodes: result.nodes.map(node => ({ id: node.node_key, type: node.node_type, text: node.config?.text || node.config?.content || node.node_type, x: Number(node.position_x), y: Number(node.position_y), config: node.config || {} })), edges: result.edges.map(edge => ({ source: idByDbId.get(edge.source_node_id), target: idByDbId.get(edge.target_node_id), handle: edge.source_handle, label: edge.label })) };
+  };
+  const handles = node => {
+    const type = node.type.toLowerCase();
+    if (type === 'menu' || type === 'carrossel') return [...(node.config.options || []).map(item => ({ id: `option:${item.id}`, label: item.title })), { id: 'unmatched', label: 'Fora das opções' }, { id: 'timeout', label: 'Timeout' }];
+    if (type.includes('aguarda')) return [{ id: 'response', label: 'Resposta' }, { id: 'timeout', label: 'Timeout' }];
+    if (type === 'condicional') return [{ id: 'success', label: 'Verdadeiro' }, { id: 'failure', label: 'Falso' }];
+    if (type.includes('ia')) return [...(node.config.conditions || []).slice(0, 10).map((name, index) => ({ id: `condition:${index + 1}`, label: name })), { id: 'success', label: 'Padrão' }, { id: 'error', label: 'Erro' }];
+    if (type.includes('integra')) return [{ id: 'success', label: 'Sucesso' }, { id: 'error', label: 'Erro' }];
+    return [{ id: 'success', label: 'Seguir' }];
+  };
+  const escape = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' })[character]);
 
-  window.openEditor = function openInteractiveEditor(flowId) {
-    const flows = JSON.parse(localStorage.getItem('prowhats_flows') || '[]');
-    const flow = flows.find(item => item.id === flowId) || { id: flowId, name: 'Novo fluxo', active: false };
-    const stored = loadGraphs()[flowId];
-    const graph = stored || defaultGraph();
-    let selectedId = graph.nodes[1]?.id || graph.nodes[0].id;
-    let interaction = null;
-
-    const nodeById = id => graph.nodes.find(node => node.id === id);
-    const canvasPoint = event => { const area = document.querySelector('.pw-canvas-inner'); const box = area.getBoundingClientRect(); return { x: event.clientX - box.left, y: event.clientY - box.top }; };
-    const edgeHtml = edge => {
-      const source = nodeById(edge.source), target = nodeById(edge.target);
-      if (!source || !target) return '';
-      const x = source.x + 190, y = source.y + 52, dx = target.x - x, dy = target.y + 52 - y;
-      const length = Math.hypot(dx, dy), angle = Math.atan2(dy, dx) * 180 / Math.PI;
-      return `<i class="edge pw-edge" style="left:${x}px;top:${y}px;width:${length}px;transform:rotate(${angle}deg)"></i>`;
-    };
+  window.openEditor = async flowId => {
+    const flow = (JSON.parse(localStorage.getItem('prowhats_flows') || '[]')).find(item => item.id === flowId) || { id: flowId, name: 'Novo fluxo', active: false };
+    let graph = defaults(); let selected = 'message'; let interaction = null; let saving = false;
+    try { const remote = await api(`/api/flows/${flowId}/graph`); graph = normalized(remote); flow.name = remote.flow.name; flow.active = remote.flow.status === 'active'; selected = graph.nodes[1]?.id || graph.nodes[0].id; } catch (error) { window.toast?.(`Modo local: ${error.message}`); }
+    const find = id => graph.nodes.find(node => node.id === id);
+    const point = event => { const element = document.querySelector('.pw-canvas-inner'); const box = element.getBoundingClientRect(); return { x: event.clientX - box.left, y: event.clientY - box.top }; };
+    const edgeHtml = edge => { const source = find(edge.source), target = find(edge.target); if (!source || !target) return ''; const x = source.x + 196, y = source.y + 52, dx = target.x - x, dy = target.y + 52 - y, length = Math.hypot(dx, dy), angle = Math.atan2(dy, dx) * 180 / Math.PI; return `<i class="edge pw-edge" title="${escape(edge.handle)}" style="left:${x}px;top:${y}px;width:${length}px;transform:rotate(${angle}deg)"></i>`; };
     const nodeHtml = node => {
-      const kind = node.type.includes('IA') ? 'ai' : node.type.includes('Aguarda') ? 'wait' : node.type === 'Condicional' ? 'condition' : '';
-      return `<article class="node pw-node ${node.id === selectedId ? 'selected' : ''}" data-node-id="${node.id}" style="left:${node.x}px;top:${node.y}px" onpointerdown="ProWhatsEditor.dragNode(event, '${node.id}')"><span class="handle in"></span><div class="node-head ${kind}"><span>${node.type}</span><span>⋮</span></div><div class="node-body">${node.text}</div><span class="handle out" title="Arraste para conectar" onpointerdown="ProWhatsEditor.beginLink(event, '${node.id}')"></span></article>`;
+      const style = node.type.includes('IA') ? 'ai' : node.type.includes('Aguarda') || node.type.includes('Intervalo') ? 'wait' : node.type === 'Condicional' ? 'condition' : '';
+      const ports = handles(node).map(port => `<button class="pw-port" data-source="${node.id}" data-handle="${escape(port.id)}" title="Conectar saída: ${escape(port.label)}">${escape(port.label)} <b>•</b></button>`).join('');
+      return `<article class="node pw-node ${node.id === selected ? 'selected' : ''}" data-node-id="${node.id}" style="left:${node.x}px;top:${node.y}px"><span class="handle in"></span><div class="node-head ${style}" data-drag="${node.id}"><span>${escape(node.type)}</span><span>⋮</span></div><div class="node-body" data-drag="${node.id}">${escape(node.text)}</div><div class="pw-ports">${ports}</div></article>`;
+    };
+    const form = node => {
+      const type = node.type.toLowerCase(), nodeConfig = node.config || {};
+      let extra = '';
+      if (type === 'mensagem') extra = `<div class="field"><label>Tempo de “digitando” (segundos)</label><input id="node-typing-delay" type="number" min="0" max="60" value="${escape(nodeConfig.typingDelaySeconds || 0)}"></div><div class="field"><label>Conteúdos adicionais</label><textarea id="node-media" placeholder="audio|https://...\nimage|https://...\nvideo|https://...">${escape((nodeConfig.contents || []).filter(item => item.type !== 'text').map(item => `${item.type}|${item.url || ''}`).join('\n'))}</textarea><small>Use uma linha por conteúdo: audio, image, video ou document seguido da URL.</small></div><label class="switch-line"><input id="node-delete-on-tag" type="checkbox" ${nodeConfig.deleteOnTag ? 'checked' : ''}> Apagar mensagem ao aplicar etiqueta</label>`;
+      else if (type.includes('ia')) extra = `<div class="field"><label>Provedor de IA</label><select id="node-ai-provider"><option ${nodeConfig.provider !== 'OpenAI' ? 'selected' : ''}>GPT</option><option ${nodeConfig.provider === 'OpenAI' ? 'selected' : ''}>OpenAI</option></select></div><div class="field"><label>Modelo</label><input id="node-ai-model" value="${escape(nodeConfig.model || 'GPT-5.4 Mini')}"></div><div class="field"><label>Variável de resposta</label><input id="node-ai-variable" value="${escape(nodeConfig.outputVariable || 'ai.response')}"></div><div class="field"><label>Prompt enviado ao modelo</label><textarea id="node-ai-prompt" placeholder="Use {variavel} para dados do fluxo.">${escape(nodeConfig.prompt || '')}</textarea></div><div class="field"><label>Condições inteligentes (uma saída por linha)</label><textarea id="node-ai-conditions" placeholder="interesse\npagamento">${escape((nodeConfig.conditions || []).join('\n'))}</textarea></div><label class="switch-line"><input id="node-ai-audio" type="checkbox" ${nodeConfig.understandAudio ? 'checked' : ''}> Entender áudio</label><label class="switch-line"><input id="node-ai-image" type="checkbox" ${nodeConfig.understandImage ? 'checked' : ''}> Entender imagem</label><label class="switch-line"><input id="node-ai-pdf" type="checkbox" ${nodeConfig.understandPdf ? 'checked' : ''}> Entender PDF</label><label class="switch-line"><input id="node-ai-context" type="checkbox" ${nodeConfig.keepContext ? 'checked' : ''}> Manter contexto da conversa</label><small>A chave da IA deve ser configurada como segredo no Railway; nunca no navegador.</small>`;
+      else if (type === 'menu' || type === 'carrossel') extra = `<div class="field"><label>Rodapé (opcional)</label><input id="node-footer" value="${escape(nodeConfig.footer || '')}"></div><div class="field"><label>Opções (uma por linha)</label><textarea id="node-options" placeholder="Vendas\nSuporte">${escape((nodeConfig.options || []).map(item => item.title).join('\n'))}</textarea></div><div class="field"><label>Variável para salvar resposta</label><input id="node-variable" value="${escape(nodeConfig.variable || 'last_response')}"></div><div class="field"><label>Expiração por inatividade (horas)</label><input id="node-timeout" type="number" min="1" max="744" value="${escape(nodeConfig.timeoutHours || 48)}"></div>`;
+      else if (type.includes('aguarda')) extra = `<div class="field"><label>Variável da resposta</label><input id="node-variable" value="${escape(nodeConfig.variable || 'last_response')}"></div><div class="field"><label>Timeout (horas)</label><input id="node-timeout" type="number" min="1" max="744" value="${escape(nodeConfig.timeoutHours || 24)}"></div><div class="field"><label>Buffer (segundos)</label><input id="node-buffer" type="number" min="0" max="120" value="${escape(nodeConfig.bufferSeconds || 0)}"></div>`;
+      else if (type === 'intervalo inteligente') extra = `<div class="field"><label>Esperar (minutos)</label><input id="node-delay" type="number" min="1" value="${escape(nodeConfig.minutes || 5)}"></div>`;
+      else if (type === 'condicional') extra = `<div class="field"><label>Variável</label><input id="node-variable" value="${escape(nodeConfig.variable || 'last_response')}"></div><div class="field"><label>Operador</label><select id="node-operator"><option value="contains" ${nodeConfig.operator !== 'equals' ? 'selected' : ''}>contém</option><option value="equals" ${nodeConfig.operator === 'equals' ? 'selected' : ''}>é igual a</option><option value="exists">existe</option></select></div><div class="field"><label>Valor</label><input id="node-value" value="${escape(nodeConfig.value || '')}"></div>`;
+      return `<h3>${escape(node.type)}</h3><p>Configuração e saídas do bloco.</p><div class="field"><label>${type === 'mensagem' ? 'Mensagem' : 'Título / conteúdo'}</label><textarea id="node-text">${escape(node.text)}</textarea></div>${extra}<button class="button primary" onclick="ProWhatsEditor.saveNode()">Salvar nó</button><button class="button danger" style="margin-top:9px" onclick="ProWhatsEditor.removeNode()">Excluir nó</button>`;
     };
     function render() {
-      const active = nodeById(selectedId) || graph.nodes[0];
-      document.querySelector('#main-content').innerHTML = `<section class="editor"><header class="editor-header"><button class="button" onclick="navigate('flows')">← Fluxos</button><div class="editor-title"><h1>${flow.name}</h1><small>Editor visual · ${flow.active ? 'Ativo' : 'Pausado'} · salvo no navegador</small></div><button class="button" onclick="ProWhatsEditor.toggleFlow()">${flow.active ? 'Pausar' : 'Ativar'}</button><button class="button primary" onclick="ProWhatsEditor.simulate()">Simular</button></header><div class="canvas-wrap"><aside class="palette"><h3>Blocos</h3><p class="palette-tip">Arraste um bloco até o canvas ou clique para adicioná-lo.</p><div class="node-options">${palette.map((type, index) => `<button class="node-option" onpointerdown="ProWhatsEditor.beginPalette(event, '${type}')" onclick="ProWhatsEditor.addNode('${type}')"><span>${icons[index]}</span>${type}</button>`).join('')}</div></aside><section class="canvas pw-canvas"><div class="canvas-inner pw-canvas-inner">${graph.edges.map(edgeHtml).join('')}${graph.nodes.map(nodeHtml).join('')}</div><section class="simulator hidden" id="simulator"><div class="card-head"><div><h4>Simulador</h4><small>Teste local, sem WhatsApp</small></div><button onclick="document.querySelector('#simulator').classList.add('hidden')">×</button></div><div class="chat-bubble">Olá! Como posso ajudar?</div><form onsubmit="ProWhatsEditor.sendSimulation(event)"><input id="simulation-input" placeholder="Digite uma resposta..."><button class="button primary">Enviar</button></form></section></section><aside class="inspector"><h3>${active.type}</h3><p>Arraste este bloco para mover. Arraste o ponto verde à direita para criar uma conexão.</p><div class="field"><label>Conteúdo</label><textarea id="node-text">${active.text}</textarea></div><div class="field"><label>Variável de saída</label><input value="resposta_cliente"></div><button class="button primary" onclick="ProWhatsEditor.saveNode()">Salvar nó</button><button class="button danger" style="margin-top:9px" onclick="ProWhatsEditor.removeSelected()">Excluir nó</button></aside></div></section>`;
+      const active = find(selected) || graph.nodes[0];
+      document.querySelector('#main-content').innerHTML = `<section class="editor"><header class="editor-header"><button class="button" onclick="navigate('flows')">← Fluxos</button><div class="editor-title"><h1>${escape(flow.name)}</h1><small>${saving ? 'Salvando…' : 'Salvo no Supabase'} · ${flow.active ? 'Ativo' : 'Pausado'}</small></div><button class="button" onclick="ProWhatsEditor.save()">Salvar</button><button class="button" onclick="ProWhatsEditor.toggle()">${flow.active ? 'Pausar' : 'Ativar'}</button><button class="button primary" onclick="ProWhatsEditor.simulate()">Simular</button></header><div class="canvas-wrap"><aside class="palette"><h3>Blocos</h3><p class="palette-tip">Arraste para o canvas ou clique para adicionar.</p><div class="node-options">${palette.map((type, index) => `<button class="node-option" data-palette="${escape(type)}"><span>${icon[index]}</span>${escape(type)}</button>`).join('')}</div></aside><section class="canvas pw-canvas"><div class="canvas-inner pw-canvas-inner">${graph.edges.map(edgeHtml).join('')}${graph.nodes.map(nodeHtml).join('')}</div><section class="simulator hidden" id="simulator"><div class="card-head"><div><h4>Simulador</h4><small>Executa o motor sem WhatsApp real</small></div><button onclick="document.querySelector('#simulator').classList.add('hidden')">×</button></div><div id="simulation-result" class="chat-bubble">Clique em enviar para iniciar o fluxo.</div><form onsubmit="ProWhatsEditor.sendSimulation(event)"><input id="simulation-input" placeholder="Resposta opcional do contato"><button class="button primary">Executar</button></form></section></section><aside class="inspector">${form(active)}</aside></div></section>`;
+      bind();
     }
-    function saveGraph() { persistGraph(flowId, graph); }
-    function addNode(type, point) {
-      const sequence = graph.nodes.length + 1;
-      const position = point || { x: 320 + (sequence % 3) * 80, y: 135 + (sequence % 4) * 70 };
-      const node = { id: `node-${Date.now()}-${sequence}`, type, text: type === 'Mensagem' ? 'Digite sua mensagem aqui' : `Configure o bloco ${type}`, x: Math.max(15, position.x - 95), y: Math.max(15, position.y - 45) };
-      graph.nodes.push(node); selectedId = node.id; saveGraph(); render();
+    function bind() {
+      document.querySelectorAll('[data-drag]').forEach(element => element.addEventListener('pointerdown', event => { if (event.button !== 0) return; const id = element.dataset.drag, node = find(id), cursor = point(event); selected = id; interaction = { type: 'drag', id, dx: cursor.x - node.x, dy: cursor.y - node.y }; event.preventDefault(); render(); }));
+      document.querySelectorAll('.pw-port').forEach(element => element.addEventListener('pointerdown', event => { event.preventDefault(); event.stopPropagation(); interaction = { type: 'link', source: element.dataset.source, handle: element.dataset.handle }; document.querySelector('.pw-canvas').classList.add('linking'); }));
+      document.querySelectorAll('[data-palette]').forEach(element => { element.addEventListener('click', () => { if (!interaction) add(element.dataset.palette); }); element.addEventListener('pointerdown', event => { if (event.button === 0) { interaction = { type: 'palette', nodeType: element.dataset.palette }; event.preventDefault(); } }); });
     }
-    function endInteraction(event) {
-      if (!interaction) return;
-      if (interaction.kind === 'link') {
-        const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('[data-node-id]')?.dataset.nodeId;
-        if (target && target !== interaction.source && !graph.edges.some(edge => edge.source === interaction.source && edge.target === target)) graph.edges.push({ source: interaction.source, target });
-      }
-      if (interaction.kind === 'palette') {
-        const overCanvas = document.elementFromPoint(event.clientX, event.clientY)?.closest('.pw-canvas');
-        if (overCanvas) addNode(interaction.type, canvasPoint(event));
-      }
-      interaction = null; document.querySelector('.pw-link-preview, .pw-node-ghost')?.remove(); saveGraph(); render();
-    }
-    document.addEventListener('pointermove', event => {
-      if (!interaction) return;
-      if (interaction.kind === 'drag') { const point = canvasPoint(event); const node = nodeById(interaction.id); node.x = Math.max(0, point.x - interaction.offsetX); node.y = Math.max(0, point.y - interaction.offsetY); const el = document.querySelector(`[data-node-id="${node.id}"]`); if (el) { el.style.left = `${node.x}px`; el.style.top = `${node.y}px`; } }
-      if (interaction.kind === 'link') { const preview = document.querySelector('.pw-link-preview'); const source = nodeById(interaction.source), point = canvasPoint(event); const x = source.x + 190, y = source.y + 52, dx = point.x - x, dy = point.y - y; preview.style.width = `${Math.hypot(dx, dy)}px`; preview.style.left = `${x}px`; preview.style.top = `${y}px`; preview.style.transform = `rotate(${Math.atan2(dy, dx) * 180 / Math.PI}deg)`; }
-      if (interaction.kind === 'palette') { const ghost = document.querySelector('.pw-node-ghost'); const point = canvasPoint(event); if (ghost) { ghost.style.left = `${point.x - 95}px`; ghost.style.top = `${point.y - 25}px`; } }
+    function add(type, position) { const count = graph.nodes.length + 1; const p = position || { x: 280 + (count % 3) * 120, y: 120 + (count % 4) * 100 }; const node = { id: `node-${Date.now()}-${count}`, type, text: type === 'Mensagem' ? 'Digite sua mensagem aqui' : `Configure ${type}`, x: Math.max(10, p.x - 100), y: Math.max(10, p.y - 45), config: type === 'Menu' ? { options: [{ id: 'option-1', title: 'Opção 1' }], variable: 'last_response', timeoutHours: 48 } : {} }; graph.nodes.push(node); selected = node.id; render(); }
+    document.addEventListener('pointermove', event => { if (!interaction || interaction.type !== 'drag') return; const node = find(interaction.id), p = point(event); node.x = Math.max(0, p.x - interaction.dx); node.y = Math.max(0, p.y - interaction.dy); const el = document.querySelector(`[data-node-id="${node.id}"]`); if (el) { el.style.left = `${node.x}px`; el.style.top = `${node.y}px`; } });
+    document.addEventListener('pointerup', event => { if (!interaction) return; if (interaction.type === 'link') { const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('[data-node-id]')?.dataset.nodeId; if (target && target !== interaction.source && !graph.edges.some(edge => edge.source === interaction.source && edge.target === target && edge.handle === interaction.handle)) graph.edges.push({ source: interaction.source, target, handle: interaction.handle }); render(); }
+      else if (interaction.type === 'palette' && document.elementFromPoint(event.clientX, event.clientY)?.closest('.pw-canvas')) add(interaction.nodeType, point(event));
+      interaction = null; document.querySelector('.pw-canvas')?.classList.remove('linking');
     });
-    document.addEventListener('pointerup', endInteraction);
     window.ProWhatsEditor = {
-      dragNode(event, id) { if (event.button !== 0 || event.target.closest('.handle')) return; const point = canvasPoint(event), node = nodeById(id); selectedId = id; interaction = { kind: 'drag', id, offsetX: point.x - node.x, offsetY: point.y - node.y }; event.preventDefault(); },
-      beginLink(event, source) { event.preventDefault(); event.stopPropagation(); const node = nodeById(source); interaction = { kind: 'link', source }; const preview = document.createElement('i'); preview.className = 'edge pw-link-preview'; preview.style.left = `${node.x + 190}px`; preview.style.top = `${node.y + 52}px`; document.querySelector('.pw-canvas-inner').append(preview); },
-      beginPalette(event, type) { if (event.button !== 0) return; event.preventDefault(); interaction = { kind: 'palette', type }; const ghost = document.createElement('div'); ghost.className = 'pw-node-ghost'; ghost.textContent = type; document.querySelector('.pw-canvas-inner').append(ghost); },
-      addNode(type) { if (!interaction) addNode(type); },
-      saveNode() { const node = nodeById(selectedId); node.text = document.querySelector('#node-text').value.trim() || node.text; saveGraph(); render(); },
-      removeSelected() { if (nodeById(selectedId)?.type === 'Início') return; graph.nodes = graph.nodes.filter(node => node.id !== selectedId); graph.edges = graph.edges.filter(edge => edge.source !== selectedId && edge.target !== selectedId); selectedId = graph.nodes[0].id; saveGraph(); render(); },
-      toggleFlow() { flow.active = !flow.active; const updated = flows.map(item => item.id === flowId ? { ...item, active: flow.active } : item); localStorage.setItem('prowhats_flows', JSON.stringify(updated)); render(); },
-      simulate() { document.querySelector('#simulator').classList.remove('hidden'); },
-      sendSimulation(event) { event.preventDefault(); const input = document.querySelector('#simulation-input'); if (!input.value.trim()) return; const bubble = document.createElement('div'); bubble.className = 'chat-bubble'; bubble.style.background = '#f1f3f6'; bubble.textContent = input.value; input.closest('#simulator').insertBefore(bubble, input.closest('form')); input.value = ''; }
+      saveNode() { const node = find(selected); node.text = document.querySelector('#node-text').value.trim() || node.text; node.config = { ...node.config, text: node.text, content: node.text }; const type = node.type.toLowerCase(); if (type === 'mensagem') { node.config.typingDelaySeconds = Number(document.querySelector('#node-typing-delay').value) || 0; node.config.deleteOnTag = document.querySelector('#node-delete-on-tag').checked; node.config.contents = [{ type: 'text', content: node.text }, ...document.querySelector('#node-media').value.split('\n').map(line => line.trim()).filter(Boolean).map(line => { const [mediaType, ...url] = line.split('|'); return { type: mediaType.trim().toLowerCase(), url: url.join('|').trim() }; })]; } else if (type.includes('ia')) { node.config.provider = document.querySelector('#node-ai-provider').value; node.config.model = document.querySelector('#node-ai-model').value.trim() || 'GPT-5.4 Mini'; node.config.outputVariable = document.querySelector('#node-ai-variable').value.trim() || 'ai.response'; node.config.prompt = document.querySelector('#node-ai-prompt').value; node.config.conditions = document.querySelector('#node-ai-conditions').value.split('\n').map(value => value.trim()).filter(Boolean).slice(0, 10); node.config.understandAudio = document.querySelector('#node-ai-audio').checked; node.config.understandImage = document.querySelector('#node-ai-image').checked; node.config.understandPdf = document.querySelector('#node-ai-pdf').checked; node.config.keepContext = document.querySelector('#node-ai-context').checked; } else if (type === 'menu' || type === 'carrossel') { node.config.options = document.querySelector('#node-options').value.split('\n').map(line => line.trim()).filter(Boolean).map((title, index) => ({ id: `option-${index + 1}`, title })); node.config.variable = document.querySelector('#node-variable').value.trim() || 'last_response'; node.config.footer = document.querySelector('#node-footer').value; node.config.timeoutHours = Number(document.querySelector('#node-timeout').value) || 48; } else if (type.includes('aguarda')) { node.config.variable = document.querySelector('#node-variable').value.trim() || 'last_response'; node.config.timeoutHours = Number(document.querySelector('#node-timeout').value) || 24; node.config.bufferSeconds = Number(document.querySelector('#node-buffer').value) || 0; } else if (type === 'intervalo inteligente') node.config.minutes = Number(document.querySelector('#node-delay').value) || 5; else if (type === 'condicional') { node.config.variable = document.querySelector('#node-variable').value.trim() || 'last_response'; node.config.operator = document.querySelector('#node-operator').value; node.config.value = document.querySelector('#node-value').value; } render(); },
+      removeNode() { const node = find(selected); if (!node || node.type === 'Início') return window.toast?.('O nó Início não pode ser removido.'); graph.nodes = graph.nodes.filter(item => item.id !== selected); graph.edges = graph.edges.filter(edge => edge.source !== selected && edge.target !== selected); selected = graph.nodes[0].id; render(); },
+      async save() { saving = true; render(); try { const result = await api(`/api/flows/${flowId}/graph`, { method: 'PUT', body: JSON.stringify({ nodes: graph.nodes, edges: graph.edges, name: flow.name, status: flow.active ? 'active' : 'paused' }) }); flow.active = result.flow.status === 'active'; window.toast?.('Fluxo salvo no Supabase.'); } catch (error) { window.toast?.(error.message); } finally { saving = false; render(); } },
+      async toggle() { flow.active = !flow.active; await this.save(); },
+      async simulate() { await this.save(); document.querySelector('#simulator').classList.remove('hidden'); },
+      async sendSimulation(event) { event.preventDefault(); const input = document.querySelector('#simulation-input').value; const result = document.querySelector('#simulation-result'); result.textContent = 'Executando…'; try { const data = await api(`/api/flows/${flowId}/simulate`, { method: 'POST', body: JSON.stringify({ input, variables: { first_name: 'Cliente' } }) }); const bubbles = data.messages.map(message => `<div class="chat-bubble"><small>${escape(message.type === 'text' ? '' : message.type.toUpperCase())}</small><p>${escape(message.content)}</p></div>`).join(''); const options = (data.options || []).map(option => `<button class="sim-option" onclick="document.querySelector('#simulation-input').value=${JSON.stringify(option.title)};ProWhatsEditor.sendSimulation(new Event('submit'))">${escape(option.title)}</button>`).join(''); result.innerHTML = `${bubbles || '<p>Nenhuma mensagem neste caminho.</p>'}${options}<small>Estado: ${escape(data.status)} · ${data.trace.map(item => `${item.nodeType} (${item.handle})`).join(' → ')}</small>`; } catch (error) { result.textContent = error.message; } }
     };
     render();
   };
